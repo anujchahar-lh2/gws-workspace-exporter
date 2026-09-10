@@ -47,6 +47,10 @@ Usage
   # Last 30 days
   python run_org_classify.py --admin admin@company.com --s3-bucket my-bucket --since-days 30
 
+  # Fixed date range (inclusive Apr 1 - Jun 30, 2026 — before-bound is exclusive)
+  python run_org_classify.py --admin admin@company.com --user user@company.com \
+      --export-only --local-only --modified-after 2026-04-01 --modified-before 2026-07-01
+
   # Single user — Drive classify + download + Gmail (no org-wide user listing)
   python run_org_classify.py --admin admin@company.com --user user@company.com --local-only
 
@@ -291,11 +295,13 @@ def _scan_file_count(rows: list[dict[str, Any]]) -> int:
     return sum(1 for row in rows if not row.get("is_folder"))
 
 
-def _filter_rows_by_modified_after(
+def _filter_rows_by_date_range(
     rows: list[dict[str, Any]],
-    modified_after: datetime,
+    modified_after: datetime | None,
+    modified_before: datetime | None,
 ) -> list[dict[str, Any]]:
-    """Keep rows whose ``modified_time`` is on or after ``modified_after``."""
+    """Keep rows whose ``modified_time`` is on/after ``modified_after`` and
+    strictly before ``modified_before`` (either bound may be omitted)."""
     filtered: list[dict[str, Any]] = []
     for row in rows:
         mt = row.get("modified_time")
@@ -306,8 +312,11 @@ def _filter_rows_by_modified_after(
             dt = datetime.fromisoformat(str(mt).replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            if dt >= modified_after:
-                filtered.append(row)
+            if modified_after is not None and dt < modified_after:
+                continue
+            if modified_before is not None and dt >= modified_before:
+                continue
+            filtered.append(row)
         except Exception:
             filtered.append(row)
     return filtered
@@ -316,13 +325,14 @@ def _filter_rows_by_modified_after(
 def _export_file_rows(
     scan_rows: list[dict[str, Any]],
     modified_after: datetime | None,
+    modified_before: datetime | None = None,
 ) -> list[dict[str, Any]]:
     rows = [
         row for row in scan_rows
         if not row.get("is_folder") and not row.get("is_shortcut")
     ]
-    if modified_after is not None:
-        rows = _filter_rows_by_modified_after(rows, modified_after)
+    if modified_after is not None or modified_before is not None:
+        rows = _filter_rows_by_date_range(rows, modified_after, modified_before)
     return rows
 
 
@@ -954,13 +964,14 @@ def _phase_export_download(
     user_dir: Path,
     sa_file: Path,
     modified_after: datetime | None,
+    modified_before: datetime | None = None,
     log_prefix: str,
 ) -> None:
     if not _DOWNLOAD_AVAILABLE:
         _phase_log(log_prefix, "download", "SKIP — dump.full_download not available")
         return
 
-    file_rows = _export_file_rows(scan_rows, modified_after)
+    file_rows = _export_file_rows(scan_rows, modified_after, modified_before)
     if not file_rows:
         _phase_log(log_prefix, "download", "SKIP — no Drive files to export")
         return
@@ -1029,13 +1040,21 @@ def _phase_gmail(
     user_dir: Path,
     sa_file: Path,
     modified_after: datetime | None,
+    modified_before: datetime | None = None,
     log_prefix: str,
 ) -> None:
     if not _GMAIL_AVAILABLE:
         _phase_log(log_prefix, "gmail", "SKIP — gmail.fetch not available")
         return
     t0 = time.time()
-    date_note = f" after {modified_after.date()}" if modified_after else " (all time)"
+    if modified_after and modified_before:
+        date_note = f" between {modified_after.date()} and {modified_before.date()}"
+    elif modified_after:
+        date_note = f" after {modified_after.date()}"
+    elif modified_before:
+        date_note = f" before {modified_before.date()}"
+    else:
+        date_note = " (all time)"
     _phase_log(log_prefix, "gmail", f"START — fetching emails + attachments{date_note}")
     try:
         gmail_svc = build_gmail_service(email, sa_file=sa_file)
@@ -1045,6 +1064,7 @@ def _phase_gmail(
                 gmail_svc,
                 out_dir=user_dir / "dump" / "emails",
                 modified_after=modified_after,
+                modified_before=modified_before,
                 log=lambda m: _log(f"{log_prefix} {m}"),
                 mailbox=email,
             )
@@ -1053,6 +1073,7 @@ def _phase_gmail(
                 gmail_svc,
                 out_dir=user_dir / "dump" / "emails",
                 modified_after=modified_after,
+                modified_before=modified_before,
                 log=lambda m: _log(f"{log_prefix} {m}"),
             )
         _phase_log(log_prefix, "gmail", f"DONE — {count} emails exported in {_elapsed(t0)}")
@@ -1227,6 +1248,18 @@ def _parse_modified_after(since_days: int, modified_after_str: str) -> datetime 
     return None
 
 
+def _parse_modified_before(modified_before_str: str) -> datetime | None:
+    """Parse --modified-before. The bound is exclusive (matches Gmail's ``before:``
+    operator) — pass the day *after* the last day you want included."""
+    if not modified_before_str:
+        return None
+    try:
+        return datetime.strptime(modified_before_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        print(f"Error: --modified-before must be YYYY-MM-DD, got {modified_before_str!r}", file=sys.stderr)
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1254,6 +1287,10 @@ Examples:
 
   # Last 30 days
   python run_org_classify.py --admin admin@co.com --s3-bucket my-bucket --since-days 30
+
+  # Fixed date range (inclusive Apr 1 - Jun 30, 2026 — before-bound is exclusive)
+  python run_org_classify.py --admin admin@co.com --user user@co.com \
+      --export-only --local-only --modified-after 2026-04-01 --modified-before 2026-07-01
 
   # No S3 — keep files local
   python run_org_classify.py --admin admin@co.com
@@ -1288,7 +1325,12 @@ Examples:
     p.add_argument("--since-days",        type=int, default=0,         metavar="N",
                    help="Only process files modified in the last N days")
     p.add_argument("--modified-after",    type=str, default="",        metavar="YYYY-MM-DD",
-                   help="Only process files modified after this date (UTC)")
+                   help="Only process files modified on/after this date (UTC)")
+    p.add_argument("--modified-before",   type=str, default="",        metavar="YYYY-MM-DD",
+                   help="Only process files modified before this date (UTC, exclusive — "
+                        "combine with --modified-after or --since-days for a closed range, "
+                        "e.g. --modified-after 2026-04-01 --modified-before 2026-07-01 "
+                        "for Apr 1 - Jun 30)")
     p.add_argument("--skip",              action="append", default=[], metavar="EMAIL",
                    help="Skip this user email (repeatable)")
     p.add_argument("--only",              action="append", default=[], metavar="EMAIL",
@@ -1337,7 +1379,10 @@ Examples:
     only_set       = set(args.only)
     if args.user:
         only_set = {args.user.strip()}
-    modified_after = _parse_modified_after(args.since_days, args.modified_after)
+    modified_after  = _parse_modified_after(args.since_days, args.modified_after)
+    modified_before = _parse_modified_before(args.modified_before)
+    if modified_after and modified_before and modified_before <= modified_after:
+        p.error("--modified-before must be after --modified-after / --since-days start")
     classify_only  = args.classify_only
     export_only    = args.export_only
     use_remote     = bool(args.s3_bucket) or args.hetzner
@@ -1372,6 +1417,7 @@ Examples:
     if args.hetzner:
         _log(f"hetzner_host={os.environ.get('SFTP_HOST', '(not set)')}")
     _log(f"modified_after={modified_after.date() if modified_after else 'all time'}")
+    _log(f"modified_before={modified_before.date() if modified_before else '(none)'}")
     _log(f"scan_workers={args.scan_workers}")
     if args.user:
         _log(f"user={args.user} (single-user mode — Drive + Gmail)")
@@ -1565,6 +1611,7 @@ Examples:
                     user_dir=user_dir,
                     sa_file=sa_file,
                     modified_after=modified_after,
+                    modified_before=modified_before,
                     log_prefix=pfx,
                 )
                 if fetch_gmail:
@@ -1573,6 +1620,7 @@ Examples:
                         user_dir=user_dir,
                         sa_file=sa_file,
                         modified_after=modified_after,
+                        modified_before=modified_before,
                         log_prefix=pfx,
                     )
             else:
@@ -1619,6 +1667,7 @@ Examples:
                             user_dir=user_dir,
                             sa_file=sa_file,
                             modified_after=modified_after,
+                            modified_before=modified_before,
                             log_prefix=pfx,
                         )
 
