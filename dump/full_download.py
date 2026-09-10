@@ -90,6 +90,23 @@ def _backoff(attempt: int) -> None:
     time.sleep(min(120.0, 0.75 * (2 ** attempt)))
 
 
+# 403 reasons Google returns for a condition retrying can never fix (export size
+# cap, permissions, abuse flag, ...) — as opposed to rate-limit 403s, which are
+# worth retrying. Without this, a single oversized Sheet burns ~6 retries x
+# backoff for no reason, every time it's encountered.
+_PERMANENT_403_REASONS = (
+    "exportSizeLimitExceeded",
+    "cannotDownloadFile",
+    "cannotDownloadAbusiveFile",
+    "insufficientFilePermissions",
+    "fileNotDownloadable",
+)
+
+
+def _is_permanent_403(e: HttpError) -> bool:
+    return e.resp.status == 403 and any(r in str(e) for r in _PERMANENT_403_REASONS)
+
+
 def _bucket_folder_name(bucket_number: Any, bucket_name: Any) -> str:
     num = str(bucket_number).strip() if pd.notna(bucket_number) else "0"
     name = _safe_name(str(bucket_name).strip() if pd.notna(bucket_name) else "uncategorised")
@@ -134,6 +151,8 @@ def _download_one(
             return None
 
         except HttpError as e:
+            if _is_permanent_403(e):
+                return f"HttpError {e.resp.status}: {e}"
             if e.resp.status in (403, 429, 500, 503) and attempt < max_retries:
                 _backoff(attempt)
                 continue
