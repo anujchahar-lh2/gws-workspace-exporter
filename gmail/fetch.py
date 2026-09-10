@@ -130,15 +130,25 @@ def list_message_ids(
     service: Any,
     *,
     modified_after: datetime | None = None,
+    modified_before: datetime | None = None,
     max_results: int | None = None,
 ) -> list[str]:
-    """Return Gmail message IDs, optionally filtered by date."""
-    q = ""
+    """Return Gmail message IDs, optionally filtered by date.
+
+    ``modified_before`` is exclusive, matching Gmail's ``before:`` operator —
+    to include a given end day, pass the day after it.
+    """
+    terms = []
     if modified_after is not None:
         if modified_after.tzinfo is None:
             modified_after = modified_after.replace(tzinfo=timezone.utc)
         # Gmail query uses after:YYYY/MM/DD
-        q = f"after:{modified_after.strftime('%Y/%m/%d')}"
+        terms.append(f"after:{modified_after.strftime('%Y/%m/%d')}")
+    if modified_before is not None:
+        if modified_before.tzinfo is None:
+            modified_before = modified_before.replace(tzinfo=timezone.utc)
+        terms.append(f"before:{modified_before.strftime('%Y/%m/%d')}")
+    q = " ".join(terms)
 
     ids: list[str] = []
     page_token: str | None = None
@@ -176,6 +186,7 @@ def fetch_and_export_emails(
     *,
     out_dir: Path,
     modified_after: datetime | None = None,
+    modified_before: datetime | None = None,
     max_emails: int | None = None,
     log: Any = None,
     mailbox: str | None = None,
@@ -203,8 +214,21 @@ def fetch_and_export_emails(
         if log:
             log(msg)
 
-    _log(f"[gmail] listing messages" + (f" after {modified_after.date()}" if modified_after else ""))
-    msg_ids = list_message_ids(service, modified_after=modified_after, max_results=max_emails)
+    if modified_after and modified_before:
+        date_note = f" between {modified_after.date()} and {modified_before.date()}"
+    elif modified_after:
+        date_note = f" after {modified_after.date()}"
+    elif modified_before:
+        date_note = f" before {modified_before.date()}"
+    else:
+        date_note = ""
+    _log(f"[gmail] listing messages{date_note}")
+    msg_ids = list_message_ids(
+        service,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        max_results=max_emails,
+    )
     _log(f"[gmail] found {len(msg_ids)} messages")
 
     meta_rows: list[dict[str, Any]] = []
