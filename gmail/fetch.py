@@ -169,6 +169,13 @@ def list_message_ids(
                     _backoff(attempt)
                 else:
                     raise
+            except OSError as e:
+                # Network-level failure (timeout, connection reset, DNS blip, ...) —
+                # HttpError above only covers errors the API itself returned.
+                if attempt < 4:
+                    _backoff(attempt)
+                else:
+                    raise
 
         ids.extend(m["id"] for m in resp.get("messages") or [])
         page_token = resp.get("nextPageToken")
@@ -223,122 +230,152 @@ def fetch_and_export_emails(
     else:
         date_note = ""
     _log(f"[gmail] listing messages{date_note}")
-    msg_ids = list_message_ids(
-        service,
-        modified_after=modified_after,
-        modified_before=modified_before,
-        max_results=max_emails,
-    )
+    try:
+        msg_ids = list_message_ids(
+            service,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            max_results=max_emails,
+        )
+    except Exception as e:
+        _log(f"[gmail] ERROR: could not list messages: {e} — exporting 0 messages")
+        msg_ids = []
     _log(f"[gmail] found {len(msg_ids)} messages")
 
     meta_rows: list[dict[str, Any]] = []
     json_messages: list[dict[str, Any]] = []
+    skipped = 0
 
     for idx, msg_id in enumerate(msg_ids, 1):
         if idx % 50 == 0:
             _log(f"[gmail] exported {idx}/{len(msg_ids)}")
 
-        for attempt in range(5):
-            try:
-                msg = service.users().messages().get(
-                    userId="me", id=msg_id, format="full"
-                ).execute()
-                break
-            except HttpError as e:
-                if e.resp.status in (429, 500, 503) and attempt < 4:
-                    _backoff(attempt)
-                else:
-                    _log(f"[gmail] warn: could not fetch message {msg_id}: {e}")
-                    msg = None
-                    break
-
-        if msg is None:
-            continue
-
-        payload  = msg.get("payload") or {}
-        headers  = payload.get("headers") or []
-        subject  = _header(headers, "Subject") or "(no subject)"
-        sender   = _header(headers, "From") or ""
-        date_str = _header(headers, "Date") or ""
-        snippet  = msg.get("snippet") or ""
-
-        body_text, attachments = _extract_text_and_attachments(payload)
-
-        # Write email body
-        email_file = out_dir / f"email_{idx:05d}.txt"
-        mailbox_line = f"Mailbox: {mailbox}\n" if mailbox else ""
-        email_content = (
-            f"{mailbox_line}"
-            f"From: {sender}\n"
-            f"Date: {date_str}\n"
-            f"Subject: {subject}\n"
-            f"Message-ID: {msg_id}\n"
-            f"{'=' * 60}\n\n"
-            f"{body_text}"
-        )
-        email_file.write_text(email_content, encoding="utf-8", errors="replace")
-
-        # Download attachments
-        att_dir = att_root / msg_id
-        downloaded_attachments: list[str] = []
-        for att in attachments:
-            att_id = att["attachment_id"]
-            raw_name = att["filename"] or "attachment"
-            safe_name = _safe_filename(raw_name)
-            for attempt in range(4):
+        try:
+            msg = None
+            for attempt in range(5):
                 try:
-                    att_resp = service.users().messages().attachments().get(
-                        userId="me", messageId=msg_id, id=att_id
+                    msg = service.users().messages().get(
+                        userId="me", id=msg_id, format="full"
                     ).execute()
-                    att_data = base64.urlsafe_b64decode(att_resp.get("data", "") + "==")
-                    att_dir.mkdir(parents=True, exist_ok=True)
-                    (att_dir / safe_name).write_bytes(att_data)
-                    downloaded_attachments.append(safe_name)
                     break
                 except HttpError as e:
-                    if e.resp.status in (429, 500, 503) and attempt < 3:
+                    if e.resp.status in (429, 500, 503) and attempt < 4:
                         _backoff(attempt)
                     else:
-                        _log(f"[gmail] warn: attachment download failed {msg_id}/{raw_name}: {e}")
+                        _log(f"[gmail] warn: could not fetch message {msg_id}: {e}")
+                        msg = None
+                        break
+                except OSError as e:
+                    # Network-level failure (timeout, connection reset, ...) — this is
+                    # what was previously uncaught and would abort the whole export.
+                    if attempt < 4:
+                        _backoff(attempt)
+                    else:
+                        _log(f"[gmail] warn: network error fetching message {msg_id} after retries: {e}")
+                        msg = None
                         break
 
-        row: dict[str, Any] = {
-            "message_id":    msg_id,
-            "index":         idx,
-            "subject":       subject,
-            "sender":        sender,
-            "date":          date_str,
-            "snippet":       snippet[:300],
-            "body_file":     email_file.name,
-            "has_attachments": len(attachments) > 0,
-            "attachments":   "; ".join(downloaded_attachments),
-        }
-        if mailbox:
-            row = {"mailbox": mailbox, **row}
-        meta_rows.append(row)
+            if msg is None:
+                skipped += 1
+                continue
 
-        att_rel: list[dict[str, str]] = []
-        for name in downloaded_attachments:
-            rel = str(Path("attachments") / msg_id / name).replace("\\", "/")
-            att_rel.append({"filename": name, "relative_path": rel})
+            payload  = msg.get("payload") or {}
+            headers  = payload.get("headers") or []
+            subject  = _header(headers, "Subject") or "(no subject)"
+            sender   = _header(headers, "From") or ""
+            date_str = _header(headers, "Date") or ""
+            snippet  = msg.get("snippet") or ""
 
-        jm: dict[str, Any] = {
-            "message_id": msg_id,
-            "index": idx,
-            "subject": subject,
-            "from": sender,
-            "to": _header(headers, "To"),
-            "cc": _header(headers, "Cc"),
-            "date": date_str,
-            "snippet": snippet,
-            "body": body_text,
-            "body_file": email_file.name,
-            "has_attachments": len(attachments) > 0,
-            "attachments": att_rel,
-        }
-        if mailbox:
-            jm = {"mailbox": mailbox, **jm}
-        json_messages.append(jm)
+            body_text, attachments = _extract_text_and_attachments(payload)
+
+            # Write email body
+            email_file = out_dir / f"email_{idx:05d}.txt"
+            mailbox_line = f"Mailbox: {mailbox}\n" if mailbox else ""
+            email_content = (
+                f"{mailbox_line}"
+                f"From: {sender}\n"
+                f"Date: {date_str}\n"
+                f"Subject: {subject}\n"
+                f"Message-ID: {msg_id}\n"
+                f"{'=' * 60}\n\n"
+                f"{body_text}"
+            )
+            email_file.write_text(email_content, encoding="utf-8", errors="replace")
+
+            # Download attachments
+            att_dir = att_root / msg_id
+            downloaded_attachments: list[str] = []
+            for att in attachments:
+                att_id = att["attachment_id"]
+                raw_name = att["filename"] or "attachment"
+                safe_name = _safe_filename(raw_name)
+                for attempt in range(4):
+                    try:
+                        att_resp = service.users().messages().attachments().get(
+                            userId="me", messageId=msg_id, id=att_id
+                        ).execute()
+                        att_data = base64.urlsafe_b64decode(att_resp.get("data", "") + "==")
+                        att_dir.mkdir(parents=True, exist_ok=True)
+                        (att_dir / safe_name).write_bytes(att_data)
+                        downloaded_attachments.append(safe_name)
+                        break
+                    except HttpError as e:
+                        if e.resp.status in (429, 500, 503) and attempt < 3:
+                            _backoff(attempt)
+                        else:
+                            _log(f"[gmail] warn: attachment download failed {msg_id}/{raw_name}: {e}")
+                            break
+                    except OSError as e:
+                        if attempt < 3:
+                            _backoff(attempt)
+                        else:
+                            _log(f"[gmail] warn: attachment download failed {msg_id}/{raw_name} after retries: {e}")
+                            break
+
+            row: dict[str, Any] = {
+                "message_id":    msg_id,
+                "index":         idx,
+                "subject":       subject,
+                "sender":        sender,
+                "date":          date_str,
+                "snippet":       snippet[:300],
+                "body_file":     email_file.name,
+                "has_attachments": len(attachments) > 0,
+                "attachments":   "; ".join(downloaded_attachments),
+            }
+            if mailbox:
+                row = {"mailbox": mailbox, **row}
+            meta_rows.append(row)
+
+            att_rel: list[dict[str, str]] = []
+            for name in downloaded_attachments:
+                rel = str(Path("attachments") / msg_id / name).replace("\\", "/")
+                att_rel.append({"filename": name, "relative_path": rel})
+
+            jm: dict[str, Any] = {
+                "message_id": msg_id,
+                "index": idx,
+                "subject": subject,
+                "from": sender,
+                "to": _header(headers, "To"),
+                "cc": _header(headers, "Cc"),
+                "date": date_str,
+                "snippet": snippet,
+                "body": body_text,
+                "body_file": email_file.name,
+                "has_attachments": len(attachments) > 0,
+                "attachments": att_rel,
+            }
+            if mailbox:
+                jm = {"mailbox": mailbox, **jm}
+            json_messages.append(jm)
+        except Exception as e:
+            # Any other unexpected failure while processing this one message — skip
+            # it, but keep going so the rest of the mailbox still gets exported, and
+            # everything collected so far still gets written out below.
+            _log(f"[gmail] warn: unexpected error on message {idx}/{len(msg_ids)} ({msg_id}): {e} — skipping")
+            skipped += 1
+            continue
 
     json_path = out_dir / "emails_all.json"
     payload: dict[str, Any] = {
@@ -362,5 +399,8 @@ def fetch_and_export_emails(
             writer.writeheader()
             writer.writerows(meta_rows)
 
-    _log(f"[gmail] export complete: {len(meta_rows)} emails → {out_dir} (emails_all.json)")
+    if skipped:
+        _log(f"[gmail] export complete: {len(meta_rows)} emails exported, {skipped} skipped after retries → {out_dir} (emails_all.json)")
+    else:
+        _log(f"[gmail] export complete: {len(meta_rows)} emails → {out_dir} (emails_all.json)")
     return len(meta_rows)
