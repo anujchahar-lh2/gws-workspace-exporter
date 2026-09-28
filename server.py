@@ -206,7 +206,8 @@ def cancel_extraction():
 @app.route('/')
 def index():
     """Serve the UI"""
-    with open('/path/to/gws-workspace-exporter/gws-exporter-ui.html', 'r') as f:
+    ui_path = os.path.join(os.path.dirname(__file__), 'gws-exporter-ui.html')
+    with open(ui_path, 'r') as f:
         return f.read()
 
 if __name__ == '__main__':
