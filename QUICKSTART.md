@@ -48,7 +48,7 @@ Then:
 
 - **UI**: http://localhost:5000
 - **Server**: `server.py`
-- **Data**: `/Users/anuj/workspace-classifier/out/`
+- **Data**: `./out/` (in your project directory)
 
 ---
 

@@ -29,7 +29,7 @@ Should show `Python 3.10.x` or newer. If not, download from [python.org](https:/
 ### Step 2: Install Dependencies
 
 ```bash
-cd /Users/anuj/workspace-classifier
+cd gws-workspace-exporter  # or your project directory
 pip3 install -r requirements.txt
 ```
 
@@ -123,10 +123,10 @@ Archive: workspace_export.zip
 
 ## Where Is My Data?
 
-All extracted data is saved locally:
+All extracted data is saved locally in your project directory:
 
 ```
-/Users/anuj/workspace-classifier/out/
+./out/
 
 ├── alice_at_company_com/
 │   ├── dump/
@@ -382,7 +382,7 @@ Logs appear automatically in the terminal
 
 ### Clear old data:
 ```bash
-rm -rf /Users/anuj/workspace-classifier/out/*
+rm -rf ./out/*
 ```
 
 ---
@@ -392,8 +392,8 @@ rm -rf /Users/anuj/workspace-classifier/out/*
 | What | Where |
 |------|-------|
 | UI | http://localhost:5000 |
-| Server | `/Users/anuj/workspace-classifier/server.py` |
-| Extracted data | `/Users/anuj/workspace-classifier/out/` |
+| Server | `./server.py` |
+| Extracted data | `./out/` |
 | Logs | Terminal output |
 | Config | `.env` (optional) |
 
@@ -405,7 +405,7 @@ rm -rf /Users/anuj/workspace-classifier/out/*
 
 ```
 Step 1: Open terminal
-  $ cd /Users/anuj/workspace-classifier
+  $ cd gws-workspace-exporter
   $ python3 server.py
   
 Step 2: Open browser
@@ -425,7 +425,7 @@ Step 4: Click START
   [Watch progress bar]
   
 Step 5: Check results
-  /Users/anuj/workspace-classifier/out/
+  ./out/
   - chaitrap_at_clinikk_com/
   - umeshn_at_clinikk_com/
   - santosh_at_clinikk_com/
@@ -495,18 +495,17 @@ curl http://localhost:5000/health
 
 ### Option 1: Review in Excel
 ```bash
-open /Users/anuj/workspace-classifier/out/emails_metadata.csv
+open ./out/emails_metadata.csv
 ```
 
 ### Option 2: Zip everything
 ```bash
-cd /Users/anuj/workspace-classifier
 zip -r my-export.zip out/
 ```
 
 ### Option 3: Copy to external drive
 ```bash
-cp -r /Users/anuj/workspace-classifier/out /Volumes/MyDrive/
+cp -r ./out /Volumes/MyDrive/
 ```
 
 ### Option 4: Share with team
