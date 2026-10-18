@@ -123,7 +123,7 @@ def run_extraction(admin_email, employee_emails, date_from, date_to, json_path):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd='/path/to/gws-workspace-exporter'
+            cwd=os.path.dirname(os.path.abspath(__file__))
         )
 
         # Monitor progress
